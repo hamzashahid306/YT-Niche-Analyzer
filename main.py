@@ -1,302 +1,360 @@
 import streamlit as st
-from googleapiclient.discovery import build
 import pandas as pd
+import requests
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-import numpy as np
-from pytube import extract
+import plotly.express as px
+import plotly.graph_objects as go
+from urllib.parse import urlparse, parse_qs
+import re
 
-# Page Configuration
-st.set_page_config(
-    page_title="YouTube Niche Analyzer",
-    page_icon="📊",
-    layout="wide"
-)
+# Set page config
+st.set_page_config(page_title="YouTube Niche Analyzer", layout="wide")
 
-# Custom CSS
-st.markdown("""
-<style>
-    .metric-box {
-        border-radius: 10px;
-        padding: 15px;
-        margin: 10px 0;
-        background-color: #f0f2f6;
+# Main title
+st.title("YouTube Niche Analyzer")
+st.markdown("Analyze any YouTube channel or video to understand its performance and niche.")
+
+# Sidebar for API key input
+with st.sidebar:
+    st.header("YouTube API Setup")
+    api_key = st.text_input("Enter your YouTube API Key:", type="password")
+    st.markdown("""
+    **How to get a YouTube API key:**
+    1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+    2. Create a new project
+    3. Enable "YouTube Data API v3"
+    4. Create credentials (API key)
+    """)
+    st.markdown("---")
+    st.info("This tool uses the YouTube API to fetch channel and video data. Your API key is not stored.")
+
+# Function to extract channel ID from URL
+def extract_channel_id(url):
+    patterns = [
+        r'youtube\.com/channel/([a-zA-Z0-9_-]+)',
+        r'youtube\.com/c/([a-zA-Z0-9_-]+)',
+        r'youtube\.com/user/([a-zA-Z0-9_-]+)',
+        r'youtube\.com/@([a-zA-Z0-9_-]+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    
+    # Handle custom URLs that might redirect
+    if 'youtube.com' in url:
+        return "custom_url"
+    
+    return None
+
+# Function to get channel data
+def get_channel_data(api_key, channel_id):
+    url = f"https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&id={channel_id}&key={api_key}"
+    response = requests.get(url)
+    data = response.json()
+    
+    if 'items' not in data or not data['items']:
+        return None
+    
+    channel_info = data['items'][0]
+    return {
+        'title': channel_info['snippet']['title'],
+        'description': channel_info['snippet']['description'],
+        'subscribers': int(channel_info['statistics']['subscriberCount']),
+        'views': int(channel_info['statistics']['viewCount']),
+        'videos': int(channel_info['statistics']['videoCount']),
+        'thumbnail': channel_info['snippet']['thumbnails']['high']['url']
     }
-    .progress-container {
-        height: 20px;
-        background: #e0e0e0;
-        border-radius: 10px;
-        margin: 10px 0;
+
+# Function to get channel videos
+def get_channel_videos(api_key, channel_id, max_results=50):
+    # First, get the uploads playlist ID
+    url = f"https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id={channel_id}&key={api_key}"
+    response = requests.get(url)
+    data = response.json()
+    
+    if 'items' not in data or not data['items']:
+        return []
+    
+    uploads_playlist_id = data['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+    
+    # Now get videos from the uploads playlist
+    videos = []
+    next_page_token = None
+    
+    while len(videos) < max_results:
+        url = f"https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId={uploads_playlist_id}&maxResults=50&key={api_key}"
+        if next_page_token:
+            url += f"&pageToken={next_page_token}"
+        
+        response = requests.get(url)
+        data = response.json()
+        
+        if 'items' not in data:
+            break
+            
+        for item in data['items']:
+            video_id = item['snippet']['resourceId']['videoId']
+            videos.append({
+                'video_id': video_id,
+                'title': item['snippet']['title'],
+                'description': item['snippet']['description'],
+                'published_at': item['snippet']['publishedAt'],
+                'thumbnail': item['snippet']['thumbnails']['high']['url']
+            })
+        
+        if 'nextPageToken' in data:
+            next_page_token = data['nextPageToken']
+        else:
+            break
+    
+    return videos[:max_results]
+
+# Function to get video statistics
+def get_video_stats(api_key, video_ids):
+    if not video_ids:
+        return []
+    
+    # YouTube API allows up to 50 videos per request
+    chunks = [video_ids[i:i + 50] for i in range(0, len(video_ids), 50)]
+    all_stats = []
+    
+    for chunk in chunks:
+        video_ids_str = ','.join(chunk)
+        url = f"https://www.googleapis.com/youtube/v3/videos?part=statistics,contentDetails,snippet&id={video_ids_str}&key={api_key}"
+        response = requests.get(url)
+        data = response.json()
+        
+        if 'items' not in data:
+            continue
+            
+        for item in data['items']:
+            stats = item['statistics']
+            snippet = item['snippet']
+            details = item['contentDetails']
+            
+            duration = details['duration']
+            # Parse ISO 8601 duration
+            hours = 0
+            minutes = 0
+            seconds = 0
+            
+            time_match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
+            if time_match:
+                hours = int(time_match.group(1) or 0)
+                minutes = int(time_match.group(2) or 0)
+                seconds = int(time_match.group(3) or 0)
+            
+            total_seconds = hours * 3600 + minutes * 60 + seconds
+            
+            all_stats.append({
+                'video_id': item['id'],
+                'views': int(stats.get('viewCount', 0)),
+                'likes': int(stats.get('likeCount', 0)),
+                'comments': int(stats.get('commentCount', 0)),
+                'duration': total_seconds,
+                'tags': snippet.get('tags', []),
+                'category': snippet.get('categoryId', '')
+            })
+    
+    return all_stats
+
+# Function to analyze niche
+def analyze_niche(videos_data):
+    if not videos_data:
+        return {}
+    
+    # Calculate averages
+    total_videos = len(videos_data)
+    total_views = sum(v['views'] for v in videos_data)
+    total_likes = sum(v['likes'] for v in videos_data)
+    total_comments = sum(v['comments'] for v in videos_data)
+    total_duration = sum(v['duration'] for v in videos_data)
+    
+    avg_views = total_views / total_videos
+    avg_likes = total_likes / total_videos
+    avg_comments = total_comments / total_videos
+    avg_duration = total_duration / total_videos
+    
+    # Calculate engagement rates
+    avg_engagement_rate = (avg_likes + avg_comments) / avg_views * 100 if avg_views > 0 else 0
+    
+    # Find most common tags
+    all_tags = []
+    for video in videos_data:
+        all_tags.extend(video['tags'])
+    
+    tag_counts = {}
+    for tag in all_tags:
+        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    
+    sorted_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
+    top_tags = [tag[0] for tag in sorted_tags[:10]]
+    
+    return {
+        'total_videos': total_videos,
+        'avg_views': avg_views,
+        'avg_likes': avg_likes,
+        'avg_comments': avg_comments,
+        'avg_duration': avg_duration,
+        'avg_engagement_rate': avg_engagement_rate,
+        'top_tags': top_tags
     }
-    .progress-bar {
-        height: 100%;
-        border-radius: 10px;
-        background: linear-gradient(90deg, #ff4b4b, #ffa34b);
-    }
-    .video-card {
-        border-left: 4px solid #ff4b4b;
-        padding: 10px;
-        margin: 10px 0;
-        background-color: #f9f9f9;
-    }
-    .big-font {
-        font-size:18px !important;
-        font-weight: bold;
-    }
-</style>
-""", unsafe_allow_html=True)
 
-# Initialize YouTube API
-@st.cache_resource
-def get_youtube_service(AIzaSyAQk4wvU0OKfk3EhUKINI77foI2u76wjmg):
-    return build('youtube', 'v3', developerKey=api_key)
-
-class YouTubeAnalyzer:
-    def __init__(self, youtube_service):
-        self.youtube = youtube_service
-    
-    def get_channel_id(self, url):
-        try:
-            return extract.channel_id(url)
-        except:
-            st.error("Invalid YouTube channel URL")
-            return None
-    
-    def get_channel_stats(self, channel_id):
-        request = self.youtube.channels().list(
-            part="snippet,contentDetails,statistics",
-            id=channel_id
-        )
-        response = request.execute()
-        return response['items'][0] if 'items' in response else None
-    
-    def get_channel_videos(self, channel_id, max_results=50):
-        channel_stats = self.get_channel_stats(channel_id)
-        if not channel_stats:
-            return []
-        
-        playlist_id = channel_stats['contentDetails']['relatedPlaylists']['uploads']
-        videos = []
-        next_page_token = None
-        
-        while len(videos) < max_results:
-            request = self.youtube.playlistItems().list(
-                part="snippet,contentDetails",
-                playlistId=playlist_id,
-                maxResults=min(50, max_results-len(videos)),
-                pageToken=next_page_token
-            )
-            response = request.execute()
-            videos.extend(response['items'])
-            next_page_token = response.get('nextPageToken')
-            if not next_page_token:
-                break
-        
-        return videos[:max_results]
-    
-    def get_video_stats(self, video_ids):
-        stats = []
-        for i in range(0, len(video_ids), 50):
-            request = self.youtube.videos().list(
-                part="snippet,contentDetails,statistics",
-                id=','.join(video_ids[i:i+50])
-            )
-            response = request.execute()
-            stats.extend(response['items'])
-        return stats
-    
-    def analyze_channel(self, channel_id):
-        channel_stats = self.get_channel_stats(channel_id)
-        if not channel_stats:
-            return None
-        
-        videos = self.get_channel_videos(channel_id, 20)
-        video_ids = [v['contentDetails']['videoId'] for v in videos]
-        video_stats = self.get_video_stats(video_ids)
-        
-        # Calculate metrics
-        sub_count = int(channel_stats['statistics']['subscriberCount'])
-        view_count = int(channel_stats['statistics']['viewCount'])
-        video_count = int(channel_stats['statistics']['videoCount'])
-        
-        # Video metrics
-        views = [int(v['statistics'].get('viewCount', 0)) for v in video_stats]
-        likes = [int(v['statistics'].get('likeCount', 0)) for v in video_stats]
-        comments = [int(v['statistics'].get('commentCount', 0)) for v in video_stats]
-        
-        avg_views = np.mean(views) if views else 0
-        avg_likes = np.mean(likes) if likes else 0
-        avg_comments = np.mean(comments) if comments else 0
-        
-        # Engagement rates
-        engagement_rate = (avg_likes + avg_comments) / avg_views * 100 if avg_views > 0 else 0
-        views_per_sub = view_count / sub_count if sub_count > 0 else 0
-        
-        # Market size score (0-100)
-        market_score = min(100, int(np.log10(sub_count + 1) * 20))
-        
-        # Saturation score (0-100)
-        saturation_score = min(100, int(100 - (engagement_rate * 2)))
-        
-        # Profitability score (0-100)
-        profit_score = min(100, int(avg_views / 10000))
-        
-        return {
-            'channel_name': channel_stats['snippet']['title'],
-            'subscribers': sub_count,
-            'total_views': view_count,
-            'videos': video_count,
-            'avg_views': avg_views,
-            'avg_likes': avg_likes,
-            'avg_comments': avg_comments,
-            'engagement_rate': engagement_rate,
-            'views_per_sub': views_per_sub,
-            'market_score': market_score,
-            'saturation_score': saturation_score,
-            'profit_score': profit_score,
-            'video_stats': video_stats
-        }
-
-def display_progress_bar(score):
-    st.markdown(f"""
-    <div class="progress-container">
-        <div class="progress-bar" style="width: {score}%"></div>
-    </div>
-    <div style="display: flex; justify-content: space-between;">
-        <span>0-49</span>
-        <span>50-70</span>
-        <span>71-100</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-def display_video_card(video):
-    stats = video['statistics']
-    snippet = video['snippet']
-    
-    title = snippet['title'][:50] + "..." if len(snippet['title']) > 50 else snippet['title']
-    channel = snippet['channelTitle']
-    views = int(stats.get('viewCount', 0))
-    likes = int(stats.get('likeCount', 0))
-    comments = int(stats.get('commentCount', 0))
-    published = snippet['publishedAt'][:10]
-    
-    engagement = (likes + comments) / views * 100 if views > 0 else 0
-    
-    st.markdown(f"""
-    <div class="video-card">
-        <p style="font-weight: bold; margin-bottom: 5px;">{title}</p>
-        <p style="margin: 0;"><span style="color: #ff4b4b;">{channel}</span> {engagement:.1f}% engagement</p>
-        <p style="margin: 0;">{views:,} views | {likes:,} likes | {comments:,} comments</p>
-        <p style="margin: 0;">Published: {published}</p>
-    </div>
-    """, unsafe_allow_html=True)
-
+# Main app
 def main():
-    st.title("YouTube Niche Analyzer")
-    st.markdown("Quickly analyze YouTube niches using live data to check market size, saturation levels and monetization potential.")
+    tab1, tab2 = st.tabs(["Channel Analysis", "Video Analysis"])
     
-    # API Key Input
-    api_key = st.text_input("Enter YouTube API Key:", type="password")
-    
-    if not api_key:
-        st.warning("Please enter a valid YouTube API key to continue")
-        return
-    
-    try:
-        youtube_service = get_youtube_service(api_key)
-        analyzer = YouTubeAnalyzer(youtube_service)
-    except:
-        st.error("Failed to initialize YouTube API. Please check your API key.")
-        return
-    
-    with st.form("analysis_form"):
-        col1, col2 = st.columns(2)
+    with tab1:
+        st.header("Channel Analysis")
+        channel_url = st.text_input("Enter YouTube Channel URL:")
         
-        with col1:
-            niche = st.text_input("NICHE", placeholder="For example, 'artificial intelligence' or 'minecraft'")
-        
-        with col2:
-            channel_url = st.text_input("Channel URL (optional)", placeholder="https://www.youtube.com/@channelname")
-        
-        submitted = st.form_submit_button("Analyze")
+        if channel_url and api_key:
+            channel_id = extract_channel_id(channel_url)
+            
+            if channel_id == "custom_url":
+                st.warning("Custom channel URLs need special handling. Please try to find the channel ID directly.")
+            elif channel_id:
+                with st.spinner("Fetching channel data..."):
+                    channel_data = get_channel_data(api_key, channel_id)
+                    
+                    if channel_data:
+                        col1, col2 = st.columns([1, 3])
+                        
+                        with col1:
+                            st.image(channel_data['thumbnail'], width=200)
+                            st.metric("Subscribers", f"{channel_data['subscribers']:,}")
+                            st.metric("Total Views", f"{channel_data['views']:,}")
+                            st.metric("Total Videos", f"{channel_data['videos']:,}")
+                        
+                        with col2:
+                            st.subheader(channel_data['title'])
+                            st.text_area("Channel Description", channel_data['description'], height=150)
+                            
+                            # Get channel videos
+                            videos = get_channel_videos(api_key, channel_id, max_results=50)
+                            video_ids = [v['video_id'] for v in videos]
+                            video_stats = get_video_stats(api_key, video_ids)
+                            
+                            # Combine video data with stats
+                            for i, video in enumerate(videos):
+                                for stat in video_stats:
+                                    if video['video_id'] == stat['video_id']:
+                                        videos[i].update(stat)
+                                        break
+                            
+                            if videos:
+                                # Analyze niche
+                                niche_data = analyze_niche(videos)
+                                
+                                st.subheader("Channel Performance Metrics")
+                                col1, col2, col3, col4 = st.columns(4)
+                                
+                                with col1:
+                                    st.metric("Average Views", f"{niche_data['avg_views']:,.0f}")
+                                with col2:
+                                    st.metric("Average Likes", f"{niche_data['avg_likes']:,.0f}")
+                                with col3:
+                                    st.metric("Average Comments", f"{niche_data['avg_comments']:,.0f}")
+                                with col4:
+                                    st.metric("Engagement Rate", f"{niche_data['avg_engagement_rate']:.2f}%")
+                                
+                                # Create dataframe for visualization
+                                df = pd.DataFrame(videos)
+                                df['published_at'] = pd.to_datetime(df['published_at'])
+                                df['published_date'] = df['published_at'].dt.date
+                                
+                                # Views over time
+                                st.subheader("Views Over Time")
+                                fig = px.line(df, x='published_date', y='views', 
+                                             title='Video Views Over Time',
+                                             hover_data=['title'])
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Duration analysis
+                                st.subheader("Video Duration Analysis")
+                                fig = px.histogram(df, x='duration', 
+                                                  title='Distribution of Video Durations (seconds)',
+                                                  nbins=20)
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Top tags
+                                st.subheader("Top Tags")
+                                if niche_data['top_tags']:
+                                    tags_df = pd.DataFrame(niche_data['top_tags'], columns=['Tag'])
+                                    st.table(tags_df)
+                                else:
+                                    st.info("No tags found for these videos.")
+                                
+                                # Top performing videos
+                                st.subheader("Top Performing Videos")
+                                top_videos = sorted(videos, key=lambda x: x['views'], reverse=True)[:10]
+                                for video in top_videos:
+                                    with st.expander(f"{video['title']} - {video['views']:,} views"):
+                                        col1, col2 = st.columns([1, 3])
+                                        with col1:
+                                            st.image(video['thumbnail'], width=150)
+                                        with col2:
+                                            st.write(f"**Published:** {video['published_at']}")
+                                            st.write(f"**Likes:** {video['likes']:,}")
+                                            st.write(f"**Comments:** {video['comments']:,}")
+                                            st.write(f"**Duration:** {video['duration']} seconds")
+                                            st.write(f"**Engagement Rate:** {(video['likes'] + video['comments']) / video['views'] * 100:.2f}%")
+                            else:
+                                st.warning("No videos found for this channel.")
+                    else:
+                        st.error("Could not fetch channel data. Please check the channel URL and API key.")
     
-    if submitted:
-        if not niche and not channel_url:
-            st.warning("Please enter either a niche or channel URL")
-            return
+    with tab2:
+        st.header("Video Analysis")
+        video_url = st.text_input("Enter YouTube Video URL:")
         
-        with st.spinner("Analyzing data..."):
-            if channel_url:
-                channel_id = analyzer.get_channel_id(channel_url)
-                if not channel_id:
-                    return
-                
-                results = analyzer.analyze_channel(channel_id)
-                niche_name = results['channel_name']
-            else:
-                # Niche analysis (analyze top channels in niche)
-                st.info("Niche analysis coming soon! Currently analyzing first channel found.")
-                return
+        if video_url and api_key:
+            # Extract video ID from URL
+            video_id = None
+            if 'youtube.com/watch?v=' in video_url:
+                video_id = video_url.split('v=')[1].split('&')[0]
+            elif 'youtu.be/' in video_url:
+                video_id = video_url.split('youtu.be/')[1].split('?')[0]
             
-            st.header(f"{niche_name}")
-            st.caption(f"Channels analyzed 1 • Videos analyzed {len(results['video_stats'])}")
-            
-            # Metrics display
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.subheader("Market Size")
-                with st.container():
-                    st.markdown(f"<div class='metric-box'><h3>{results['market_score']}</h3></div>", unsafe_allow_html=True)
-                    display_progress_bar(results['market_score'])
-                    viral_views = f"{results['total_views']/1000000:.1f}M" if results['total_views'] > 1000000 else f"{results['total_views']/1000:.1f}K"
-                    st.markdown(f"""
-                    <p class="big-font">Viral Views Potential {viral_views}</p>
-                    <p class="big-font">Loyal Audience {results['subscribers']:,}</p>
-                    """, unsafe_allow_html=True)
-                    st.write("Decent market size with good potential for viral content.")
-            
-            with col2:
-                st.subheader("Unsaturated")
-                with st.container():
-                    st.markdown(f"<div class='metric-box'><h3>{results['saturation_score']}</h3></div>", unsafe_allow_html=True)
-                    display_progress_bar(results['saturation_score'])
-                    st.markdown(f"""
-                    <p class="big-font">Reach Beyond Subscribers {results['views_per_sub']:.1f}</p>
-                    <p class="big-font">Loyal Subs {results['engagement_rate']:.1f}%</p>
-                    """, unsafe_allow_html=True)
-                    st.write("This niche appears to be unsaturated with good growth potential.")
-            
-            with col3:
-                st.subheader("Profitable")
-                with st.container():
-                    st.markdown(f"<div class='metric-box'><h3>{results['profit_score']}</h3></div>", unsafe_allow_html=True)
-                    display_progress_bar(results['profit_score'])
-                    rpm_range = (1.5, 2.8)  # Example RPM range
-                    st.markdown(f"""
-                    <p class="big-font">RPM Estimation ${rpm_range[0]} - ${rpm_range[1]}</p>
-                    <p class="big-font">Avg. Views {results['avg_views']:,.0f}</p>
-                    """, unsafe_allow_html=True)
-                    st.write("Moderate revenue potential based on average view counts.")
-            
-            st.divider()
-            
-            # Sample videos section
-            st.subheader("Top Performing Videos")
-            for video in sorted(results['video_stats'], key=lambda x: int(x['statistics'].get('viewCount', 0)), reverse=True)[:5]:
-                display_video_card(video)
-            
-            st.divider()
-            
-            # Revenue estimations
-            st.subheader("Revenue Estimations")
-            rpm_low, rpm_high = rpm_range
-            st.markdown(f"<p class='big-font'>1,000 (RPM) views ${rpm_low*1:.1f} to ${rpm_high*1:.1f}</p>", unsafe_allow_html=True)
-            st.markdown(f"<p class='big-font'>10,000 views ${rpm_low*10:.1f} to ${rpm_high*10:.1f}</p>", unsafe_allow_html=True)
-            st.markdown(f"<p class='big-font'>100,000 views ${rpm_low*100:.1f} to ${rpm_high*100:.1f}</p>", unsafe_allow_html=True)
-            st.markdown(f"<p class='big-font'>1,000,000 views ${rpm_low*1000:.1f}K to ${rpm_high*1000/1000:.1f}K</p>", unsafe_allow_html=True)
-            
-            st.caption("These estimations are not 100% reliable and are for English speaking audiences only.")
+            if video_id:
+                with st.spinner("Fetching video data..."):
+                    video_stats = get_video_stats(api_key, [video_id])
+                    
+                    if video_stats:
+                        video_data = video_stats[0]
+                        
+                        # Get video snippet data
+                        url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet&id={video_id}&key={api_key}"
+                        response = requests.get(url)
+                        snippet_data = response.json()
+                        
+                        if 'items' in snippet_data and snippet_data['items']:
+                            snippet = snippet_data['items'][0]['snippet']
+                            
+                            col1, col2 = st.columns([1, 3])
+                            
+                            with col1:
+                                st.image(snippet['thumbnails']['high']['url'], width=300)
+                                st.metric("Views", f"{video_data['views']:,}")
+                                st.metric("Likes", f"{video_data['likes']:,}")
+                                st.metric("Comments", f"{video_data['comments']:,}")
+                                st.metric("Duration", f"{video_data['duration']} seconds")
+                                
+                                engagement_rate = (video_data['likes'] + video_data['comments']) / video_data['views'] * 100 if video_data['views'] > 0 else 0
+                                st.metric("Engagement Rate", f"{engagement_rate:.2f}%")
+                            
+                            with col2:
+                                st.subheader(snippet['title'])
+                                st.write(f"**Published:** {snippet['publishedAt']}")
+                                st.text_area("Description", snippet['description'], height=200)
+                                
+                                if 'tags' in snippet and snippet['tags']:
+                                    st.subheader("Tags")
+                                    st.write(", ".join(snippet['tags']))
+                    else:
+                        st.error("Could not fetch video data. Please check the video URL and API key.")
 
 if __name__ == "__main__":
     main()
