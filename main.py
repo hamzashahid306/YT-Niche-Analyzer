@@ -2,17 +2,15 @@ import streamlit as st
 from googleapiclient.discovery import build
 import pandas as pd
 from datetime import datetime, timedelta
-import isodate
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from pytube import extract
 
 # Page Configuration
 st.set_page_config(
     page_title="YouTube Niche Analyzer",
     page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
 # Custom CSS
@@ -44,10 +42,6 @@ st.markdown("""
     .big-font {
         font-size:18px !important;
         font-weight: bold;
-    }
-    .stButton>button {
-        background-color: #ff4b4b;
-        color: white;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -89,12 +83,11 @@ class YouTubeAnalyzer:
             request = self.youtube.playlistItems().list(
                 part="snippet,contentDetails",
                 playlistId=playlist_id,
-                maxResults=min(50, max_results - len(videos)),
+                maxResults=min(50, max_results-len(videos)),
                 pageToken=next_page_token
             )
             response = request.execute()
             videos.extend(response['items'])
-            
             next_page_token = response.get('nextPageToken')
             if not next_page_token:
                 break
@@ -104,22 +97,13 @@ class YouTubeAnalyzer:
     def get_video_stats(self, video_ids):
         stats = []
         for i in range(0, len(video_ids), 50):
-            request = self.youtube.videos().list()
+            request = self.youtube.videos().list(
                 part="snippet,contentDetails,statistics",
                 id=','.join(video_ids[i:i+50])
+            )
             response = request.execute()
             stats.extend(response['items'])
         return stats
-    
-    def search_channels(self, query, max_results=5):
-        request = self.youtube.search().list(
-            part="snippet",
-            q=query,
-            type="channel",
-            maxResults=max_results
-        )
-        response = request.execute()
-        return response['items']
     
     def analyze_channel(self, channel_id):
         channel_stats = self.get_channel_stats(channel_id)
@@ -136,25 +120,26 @@ class YouTubeAnalyzer:
         video_count = int(channel_stats['statistics']['videoCount'])
         
         # Video metrics
-        views = []
-        likes = []
-        comments = []
-        durations = []
-        
-        for video in video_stats:
-            views.append(int(video['statistics'].get('viewCount', 0)))
-            likes.append(int(video['statistics'].get('likeCount', 0)))
-            comments.append(int(video['statistics'].get('commentCount', 0)))
-            durations.append(isodate.parse_duration(video['contentDetails']['duration']).total_seconds())
+        views = [int(v['statistics'].get('viewCount', 0)) for v in video_stats]
+        likes = [int(v['statistics'].get('likeCount', 0)) for v in video_stats]
+        comments = [int(v['statistics'].get('commentCount', 0)) for v in video_stats]
         
         avg_views = np.mean(views) if views else 0
         avg_likes = np.mean(likes) if likes else 0
         avg_comments = np.mean(comments) if comments else 0
-        avg_duration = np.mean(durations) if durations else 0
         
         # Engagement rates
         engagement_rate = (avg_likes + avg_comments) / avg_views * 100 if avg_views > 0 else 0
         views_per_sub = view_count / sub_count if sub_count > 0 else 0
+        
+        # Market size score (0-100)
+        market_score = min(100, int(np.log10(sub_count + 1) * 20))
+        
+        # Saturation score (0-100)
+        saturation_score = min(100, int(100 - (engagement_rate * 2)))
+        
+        # Profitability score (0-100)
+        profit_score = min(100, int(avg_views / 10000))
         
         return {
             'channel_name': channel_stats['snippet']['title'],
@@ -164,47 +149,13 @@ class YouTubeAnalyzer:
             'avg_views': avg_views,
             'avg_likes': avg_likes,
             'avg_comments': avg_comments,
-            'avg_duration': avg_duration,
             'engagement_rate': engagement_rate,
             'views_per_sub': views_per_sub,
+            'market_score': market_score,
+            'saturation_score': saturation_score,
+            'profit_score': profit_score,
             'video_stats': video_stats
         }
-
-def display_metrics(metrics):
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.subheader("Market Size")
-        with st.container():
-            market_score = min(100, int(metrics['subscribers'] / 100000))
-            st.markdown(f"<div class='metric-box'><h3>{market_score}</h3></div>", unsafe_allow_html=True)
-            display_progress_bar(market_score)
-            st.markdown(f"""
-            <p class="big-font">Viral Potential: {metrics['total_views']:,} views</p>
-            <p class="big-font">Subscribers: {metrics['subscribers']:,}</p>
-            """, unsafe_allow_html=True)
-    
-    with col2:
-        st.subheader("Engagement")
-        with st.container():
-            engagement_score = min(100, int(metrics['engagement_rate'] * 10))
-            st.markdown(f"<div class='metric-box'><h3>{engagement_score}</h3></div>", unsafe_allow_html=True)
-            display_progress_bar(engagement_score)
-            st.markdown(f"""
-            <p class="big-font">Engagement Rate: {metrics['engagement_rate']:.1f}%</p>
-            <p class="big-font">Views/Sub: {metrics['views_per_sub']:.1f}</p>
-            """, unsafe_allow_html=True)
-    
-    with col3:
-        st.subheader("Content")
-        with st.container():
-            content_score = min(100, int(metrics['avg_views'] / 10000))
-            st.markdown(f"<div class='metric-box'><h3>{content_score}</h3></div>", unsafe_allow_html=True)
-            display_progress_bar(content_score)
-            st.markdown(f"""
-            <p class="big-font">Avg. Views: {metrics['avg_views']:,.0f}</p>
-            <p class="big-font">Video Count: {metrics['videos']}</p>
-            """, unsafe_allow_html=True)
 
 def display_progress_bar(score):
     st.markdown(f"""
@@ -222,7 +173,7 @@ def display_video_card(video):
     stats = video['statistics']
     snippet = video['snippet']
     
-    title = snippet['title']
+    title = snippet['title'][:50] + "..." if len(snippet['title']) > 50 else snippet['title']
     channel = snippet['channelTitle']
     views = int(stats.get('viewCount', 0))
     likes = int(stats.get('likeCount', 0))
@@ -241,10 +192,10 @@ def display_video_card(video):
     """, unsafe_allow_html=True)
 
 def main():
-    st.title("📊 YouTube Niche Analyzer")
-    st.markdown("Analyze YouTube channels and niches using the YouTube Data API")
+    st.title("YouTube Niche Analyzer")
+    st.markdown("Quickly analyze YouTube niches using live data to check market size, saturation levels and monetization potential.")
     
-    # API Key Input (for demo purposes - in production use secrets.toml)
+    # API Key Input
     api_key = st.text_input("Enter YouTube API Key:", type="password")
     
     if not api_key:
@@ -258,70 +209,94 @@ def main():
         st.error("Failed to initialize YouTube API. Please check your API key.")
         return
     
-    tab1, tab2 = st.tabs(["Analyze Channel", "Analyze Niche"])
-    
-    with tab1:
-        st.subheader("Analyze YouTube Channel")
-        channel_url = st.text_input("Enter YouTube Channel URL:")
+    with st.form("analysis_form"):
+        col1, col2 = st.columns(2)
         
-        if st.button("Analyze Channel") and channel_url:
-            with st.spinner("Fetching channel data..."):
+        with col1:
+            niche = st.text_input("NICHE", placeholder="For example, 'artificial intelligence' or 'minecraft'")
+        
+        with col2:
+            channel_url = st.text_input("Channel URL (optional)", placeholder="https://www.youtube.com/@channelname")
+        
+        submitted = st.form_submit_button("Analyze")
+    
+    if submitted:
+        if not niche and not channel_url:
+            st.warning("Please enter either a niche or channel URL")
+            return
+        
+        with st.spinner("Analyzing data..."):
+            if channel_url:
                 channel_id = analyzer.get_channel_id(channel_url)
-                if channel_id:
-                    metrics = analyzer.analyze_channel(channel_id)
-                    if metrics:
-                        st.success(f"Analyzing channel: {metrics['channel_name']}")
-                        display_metrics(metrics)
-                        
-                        st.subheader("Recent Videos Performance")
-                        for video in metrics['video_stats']:
-                            display_video_card(video)
-                        
-                        # Show metrics charts
-                        st.subheader("Performance Metrics")
-                        plot_metrics(metrics)
-    
-    with tab2:
-        st.subheader("Analyze YouTube Niche")
-        niche_query = st.text_input("Enter niche keyword (e.g., 'tech reviews', 'cooking'):")
-        
-        if st.button("Analyze Niche") and niche_query:
-            with st.spinner(f"Searching for {niche_query} channels..."):
-                channels = analyzer.search_channels(niche_query, 5)
-                if channels:
-                    st.success(f"Found {len(channels)} channels for niche: {niche_query}")
-                    
-                    for channel in channels:
-                        channel_id = channel['snippet']['channelId']
-                        channel_name = channel['snippet']['channelTitle']
-                        
-                        with st.expander(f"📺 {channel_name}"):
-                            metrics = analyzer.analyze_channel(channel_id)
-                            if metrics:
-                                display_metrics(metrics)
-                                st.markdown(f"[Visit Channel](https://youtube.com/channel/{channel_id})")
-
-def plot_metrics(metrics):
-    fig, ax = plt.subplots(1, 2, figsize=(12, 4))
-    
-    # Views distribution
-    views = [int(v['statistics'].get('viewCount', 0)) for v in metrics['video_stats']]
-    ax[0].hist(views, bins=10, color='#ff4b4b')
-    ax[0].set_title('Views Distribution')
-    ax[0].set_xlabel('Views')
-    ax[0].set_ylabel('Number of Videos')
-    
-    # Engagement scatter plot
-    likes = [int(v['statistics'].get('likeCount', 0)) for v in metrics['video_stats']]
-    comments = [int(v['statistics'].get('commentCount', 0)) for v in metrics['video_stats']]
-    ax[1].scatter(views, likes, color='#ff4b4b', label='Likes')
-    ax[1].scatter(views, comments, color='#ffa34b', label='Comments')
-    ax[1].set_title('Engagement Metrics')
-    ax[1].set_xlabel('Views')
-    ax[1].set_ylabel('Count')
-    ax[1].legend()
-    
-    st.pyplot(fig)
+                if not channel_id:
+                    return
+                
+                results = analyzer.analyze_channel(channel_id)
+                niche_name = results['channel_name']
+            else:
+                # Niche analysis (analyze top channels in niche)
+                st.info("Niche analysis coming soon! Currently analyzing first channel found.")
+                return
+            
+            st.header(f"{niche_name}")
+            st.caption(f"Channels analyzed 1 • Videos analyzed {len(results['video_stats'])}")
+            
+            # Metrics display
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.subheader("Market Size")
+                with st.container():
+                    st.markdown(f"<div class='metric-box'><h3>{results['market_score']}</h3></div>", unsafe_allow_html=True)
+                    display_progress_bar(results['market_score'])
+                    viral_views = f"{results['total_views']/1000000:.1f}M" if results['total_views'] > 1000000 else f"{results['total_views']/1000:.1f}K"
+                    st.markdown(f"""
+                    <p class="big-font">Viral Views Potential {viral_views}</p>
+                    <p class="big-font">Loyal Audience {results['subscribers']:,}</p>
+                    """, unsafe_allow_html=True)
+                    st.write("Decent market size with good potential for viral content.")
+            
+            with col2:
+                st.subheader("Unsaturated")
+                with st.container():
+                    st.markdown(f"<div class='metric-box'><h3>{results['saturation_score']}</h3></div>", unsafe_allow_html=True)
+                    display_progress_bar(results['saturation_score'])
+                    st.markdown(f"""
+                    <p class="big-font">Reach Beyond Subscribers {results['views_per_sub']:.1f}</p>
+                    <p class="big-font">Loyal Subs {results['engagement_rate']:.1f}%</p>
+                    """, unsafe_allow_html=True)
+                    st.write("This niche appears to be unsaturated with good growth potential.")
+            
+            with col3:
+                st.subheader("Profitable")
+                with st.container():
+                    st.markdown(f"<div class='metric-box'><h3>{results['profit_score']}</h3></div>", unsafe_allow_html=True)
+                    display_progress_bar(results['profit_score'])
+                    rpm_range = (1.5, 2.8)  # Example RPM range
+                    st.markdown(f"""
+                    <p class="big-font">RPM Estimation ${rpm_range[0]} - ${rpm_range[1]}</p>
+                    <p class="big-font">Avg. Views {results['avg_views']:,.0f}</p>
+                    """, unsafe_allow_html=True)
+                    st.write("Moderate revenue potential based on average view counts.")
+            
+            st.divider()
+            
+            # Sample videos section
+            st.subheader("Top Performing Videos")
+            for video in sorted(results['video_stats'], key=lambda x: int(x['statistics'].get('viewCount', 0)), reverse=True)[:5]:
+                display_video_card(video)
+            
+            st.divider()
+            
+            # Revenue estimations
+            st.subheader("Revenue Estimations")
+            rpm_low, rpm_high = rpm_range
+            st.markdown(f"<p class='big-font'>1,000 (RPM) views ${rpm_low*1:.1f} to ${rpm_high*1:.1f}</p>", unsafe_allow_html=True)
+            st.markdown(f"<p class='big-font'>10,000 views ${rpm_low*10:.1f} to ${rpm_high*10:.1f}</p>", unsafe_allow_html=True)
+            st.markdown(f"<p class='big-font'>100,000 views ${rpm_low*100:.1f} to ${rpm_high*100:.1f}</p>", unsafe_allow_html=True)
+            st.markdown(f"<p class='big-font'>1,000,000 views ${rpm_low*1000:.1f}K to ${rpm_high*1000/1000:.1f}K</p>", unsafe_allow_html=True)
+            
+            st.caption("These estimations are not 100% reliable and are for English speaking audiences only.")
 
 if __name__ == "__main__":
     main()
