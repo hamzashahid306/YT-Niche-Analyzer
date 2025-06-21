@@ -4,7 +4,7 @@ import pandas as pd
 
 st.title("🔍 YouTube Niche Analyzer")
 
-API_KEY = st.secrets["youtube"]["AIzaSyAQk4wvU0OKfk3EhUKINI77foI2u76wjmg"]
+API_KEY = st.secrets["youtube"]["api_key"]
 yt = build("youtube", "v3", developerKey=API_KEY)
 
 def fetch_channels(q):
