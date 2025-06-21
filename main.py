@@ -407,7 +407,9 @@ def main():
                 st.markdown(f"""
                 <div class="metric-box">
                     <b>Top Tags:</b> {', '.join([tag[0] for tag in niche_data['top_tags']])}<br>
-                    <b>Content Type:</b> {['Entertainment', 'Education', 'How-to', 'Vlog', 'Review'][int(niche_data['avg_engagement_rate']//20]}
+                    content_types = ['Entertainment', 'Education', 'How-to', 'Vlog', 'Review']
+content_index = int(niche_data['avg_engagement_rate']//20)
+<b>Content Type:</b> {content_types[content_index]}
                 </div>
                 """, unsafe_allow_html=True)
             
