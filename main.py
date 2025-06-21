@@ -104,7 +104,7 @@ class YouTubeAnalyzer:
     def get_video_stats(self, video_ids):
         stats = []
         for i in range(0, len(video_ids), 50):
-            request = self.youtube.videos().list(
+            request = self.youtube.videos().list()
                 part="snippet,contentDetails,statistics",
                 id=','.join(video_ids[i:i+50])
             response = request.execute()
